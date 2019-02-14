@@ -7,6 +7,11 @@ import android.security.keystore.KeyProperties
 import android.support.v7.app.AppCompatActivity
 import android.widget.Button
 import com.google.common.io.BaseEncoding
+import com.google.crypto.tink.Aead
+import com.google.crypto.tink.KeysetHandle
+import com.google.crypto.tink.aead.AeadConfig
+import com.google.crypto.tink.aead.AeadFactory
+import com.google.crypto.tink.aead.AeadKeyTemplates
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,6 +23,7 @@ import java.security.PrivateKey
 import java.util.*
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
+import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.IvParameterSpec
 
 class MainActivity : AppCompatActivity() {
@@ -25,6 +31,15 @@ class MainActivity : AppCompatActivity() {
     private val job = Job()
     private val ioScope = CoroutineScope(Dispatchers.IO + job)
     private val uiScope = CoroutineScope(Dispatchers.Main + job)
+
+    private val keysetHandle: KeysetHandle
+    private val aeadPrimitive: Aead
+
+    init {
+        AeadConfig.register()
+        keysetHandle = KeysetHandle.generateNew(AeadKeyTemplates.AES256_GCM)
+        aeadPrimitive = AeadFactory.getPrimitive(keysetHandle)
+    }
 
     companion object {
         private val LOGGER = LoggerFactory.getLogger(MainActivity::class.java)
@@ -36,6 +51,7 @@ class MainActivity : AppCompatActivity() {
 
         const val CIPHER_PADDING_RSA_ECB:String = "RSA/ECB/PKCS1Padding"
         const val CIPHER_PADDING_AES_CBC:String = "AES/CBC/PKCS7Padding"
+        const val CIPHER_PADDING_AES_GCM:String = "AES/GCM/NoPadding"
 
         const val IV_SEPARATOR = ":" // not used in base64 encoding table
     }
@@ -89,6 +105,20 @@ class MainActivity : AppCompatActivity() {
                 loadSecretAES()
             }
         }
+
+        val encryptAesBtn = findViewById<Button>(R.id.encryptAesBtn)
+        encryptAesBtn.setOnClickListener {
+            ioScope.launch {
+                encryptString()
+            }
+        }
+
+        val decryptAesBtn = findViewById<Button>(R.id.decryptAesBtn)
+        decryptAesBtn.setOnClickListener {
+            ioScope.launch {
+                decryptString()
+            }
+        }
     }
 
     private fun loadInstanceId():String {
@@ -100,7 +130,7 @@ class MainActivity : AppCompatActivity() {
         instanceId?.let {
             LOGGER.info("retrieved instance id from shared preferences: {}", instanceId)
             return instanceId
-        }.run {
+        } ?:run {
             LOGGER.info("no value retrieved from shared preferences, creating new instance id")
             return generateInstanceId()
         }
@@ -146,7 +176,7 @@ class MainActivity : AppCompatActivity() {
 
                 return decipheredSecret
 
-            }.run {
+            } ?:run {
                 LOGGER.info("no value retrieved from keystore, creating new secret")
                 return generateSecretRSA(instanceId)
             }
@@ -220,19 +250,21 @@ class MainActivity : AppCompatActivity() {
                 val keyEntry = (keyStore.getEntry(instanceId, null) as KeyStore.SecretKeyEntry?)
                 keyEntry?.let {
                     val key = keyEntry.secretKey
-                    val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
-                    cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(BaseEncoding.base64().decode(initializationVector)))
+                    //val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
+                    //cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(BaseEncoding.base64().decode(initializationVector)))
+                    val cipher = Cipher.getInstance(CIPHER_PADDING_AES_GCM)
+                    cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, BaseEncoding.base64().decode(initializationVector)))
 
                     val decipheredSecret = String(cipher.doFinal(BaseEncoding.base64().decode(cipheredSecret)))
                     LOGGER.info("deciphered secret: {}", decipheredSecret)
 
                     return decipheredSecret
-                }.run {
+                } ?:run {
                     LOGGER.warn("AES key not found in keystore")
                     return null
                 }
 
-            }.run {
+            } ?:run {
                 LOGGER.info("no value retrieved from keystore, creating new secret")
                 return generateSecretAES(instanceId)
             }
@@ -254,13 +286,16 @@ class MainActivity : AppCompatActivity() {
             keyGenerator.init(
                 KeyGenParameterSpec.Builder(instanceId,
                     KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                    .setBlockModes(KeyProperties.BLOCK_MODE_CBC)
-                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_PKCS7)
+                    //.setBlockModes(KeyProperties.BLOCK_MODE_CBC)
+                    //.setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_PKCS7)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
                     .build()
             )
 
             val key = keyGenerator.generateKey()
-            val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
+            //val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
+            val cipher = Cipher.getInstance(CIPHER_PADDING_AES_GCM)
             cipher.init(Cipher.ENCRYPT_MODE, key)
             val initializationVector = BaseEncoding.base64().encode(cipher.iv)
             LOGGER.info("initialization vector: {}", initializationVector)
@@ -281,6 +316,60 @@ class MainActivity : AppCompatActivity() {
 
         } catch (exc: Exception) {
             LOGGER.error(exc.message, exc)
+            return null
+        }
+    }
+
+    private fun encryptString():String? {
+        val plainText = "some_value"
+        return encryptAES(plainText)
+    }
+
+    private fun decryptString():String? {
+        val cipheredText = encryptString()
+        return cipheredText?.let {
+            decryptAES(cipheredText)
+        } ?:run {
+            null
+        }
+    }
+
+    private fun encryptAES(decipheredText:String):String? {
+        LOGGER.info("encryptAES")
+
+        val secret = loadSecretAES()
+        secret?.let {
+            return try {
+                val cipheredText = BaseEncoding.base64().encode(aeadPrimitive.encrypt(decipheredText.toByteArray(), secret.toByteArray()))
+                LOGGER.info("ciphered text: {}", cipheredText)
+                cipheredText
+
+            } catch (exc: Exception) {
+                LOGGER.error(exc.message, exc)
+                null
+            }
+        } ?:run {
+            LOGGER.warn("fail to retrieve secret")
+            return null
+        }
+    }
+
+    private fun decryptAES(cipheredText:String):String? {
+        LOGGER.info("decryptAES")
+
+        val secret = loadSecretAES()
+        secret?.let {
+            return try {
+                val decipheredText = String(aeadPrimitive.decrypt(BaseEncoding.base64().decode(cipheredText), secret.toByteArray()))
+                LOGGER.info("deciphered text: {}", decipheredText)
+                decipheredText
+
+            } catch (exc: Exception) {
+                LOGGER.error(exc.message, exc)
+                null
+            }
+        } ?:run {
+            LOGGER.warn("fail to retrieve secret")
             return null
         }
     }
