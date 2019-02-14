@@ -7,6 +7,10 @@ import android.security.keystore.KeyProperties
 import android.support.v7.app.AppCompatActivity
 import android.widget.Button
 import com.google.common.io.BaseEncoding
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
@@ -18,7 +22,9 @@ import javax.crypto.spec.IvParameterSpec
 
 class MainActivity : AppCompatActivity() {
 
-    var iv:ByteArray? = null
+    private val job = Job()
+    private val ioScope = CoroutineScope(Dispatchers.IO + job)
+    private val uiScope = CoroutineScope(Dispatchers.Main + job)
 
     companion object {
         private val LOGGER = LoggerFactory.getLogger(MainActivity::class.java)
@@ -44,32 +50,44 @@ class MainActivity : AppCompatActivity() {
     private fun initUI() {
         val generateInstanceIdBtn = findViewById<Button>(R.id.generateInstanceIdBtn)
         generateInstanceIdBtn.setOnClickListener {
-            this.generateInstanceId()
+            ioScope.launch {
+                generateInstanceId()
+            }
         }
 
         val loadInstanceIdBtn = findViewById<Button>(R.id.loadInstanceIdBtn)
         loadInstanceIdBtn.setOnClickListener {
-            this.loadInstanceId()
+            ioScope.launch {
+                loadInstanceId()
+            }
         }
 
         val generateSecretRsaBtn = findViewById<Button>(R.id.generateSecretRsaBtn)
         generateSecretRsaBtn.setOnClickListener {
-            this.generateSecretRSA(this.loadInstanceId())
+            ioScope.launch {
+                generateSecretRSA(loadInstanceId())
+            }
         }
 
         val loadSecretRsaBtn = findViewById<Button>(R.id.loadSecretRsaBtn)
         loadSecretRsaBtn.setOnClickListener {
-            this.loadSecretRSA()
+            ioScope.launch {
+                loadSecretRSA()
+            }
         }
 
         val generateSecretAesBtn = findViewById<Button>(R.id.generateSecretAesBtn)
         generateSecretAesBtn.setOnClickListener {
-            this.generateSecretAES(this.loadInstanceId())
+            ioScope.launch {
+                generateSecretAES(loadInstanceId())
+            }
         }
 
         val loadSecretAesBtn = findViewById<Button>(R.id.loadSecretAesBtn)
         loadSecretAesBtn.setOnClickListener {
-            this.loadSecretAES()
+            ioScope.launch {
+                loadSecretAES()
+            }
         }
     }
 
@@ -103,7 +121,7 @@ class MainActivity : AppCompatActivity() {
         return instanceId
     }
 
-    private fun loadSecretRSA():String {
+    private fun loadSecretRSA():String? {
         LOGGER.info("loadSecretRSA")
 
         val instanceId = loadInstanceId()
@@ -112,129 +130,158 @@ class MainActivity : AppCompatActivity() {
         val cipheredSecret = sharedPref.getString(INSTANCE_CREDENTIAL, null)
         LOGGER.info("retrieved secret: {}", cipheredSecret)
 
-        cipheredSecret?.let {
-            val keyStore: KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply {
-                load(null)
+        try {
+            cipheredSecret?.let {
+                val keyStore: KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply {
+                    load(null)
+                }
+
+                val privateKey = keyStore.getKey(instanceId, null) as PrivateKey?
+                //val publicKey = keyStore.getCertificate(instanceId)?.publicKey
+
+                val cipher = Cipher.getInstance(CIPHER_PADDING_RSA_ECB)
+                cipher.init(Cipher.DECRYPT_MODE, privateKey)
+                val decipheredSecret = String(cipher.doFinal(BaseEncoding.base64().decode(cipheredSecret)))
+                LOGGER.info("deciphered secret: {}", decipheredSecret)
+
+                return decipheredSecret
+
+            }.run {
+                LOGGER.info("no value retrieved from keystore, creating new secret")
+                return generateSecretRSA(instanceId)
             }
 
-            val privateKey = keyStore.getKey(instanceId, null) as PrivateKey?
-            //val publicKey = keyStore.getCertificate(instanceId)?.publicKey
-
-            val cipher = Cipher.getInstance(CIPHER_PADDING_RSA_ECB)
-            cipher.init(Cipher.DECRYPT_MODE, privateKey)
-            val decipheredSecret = String(cipher.doFinal(BaseEncoding.base64().decode(cipheredSecret)))
-            LOGGER.info("deciphered secret: {}", decipheredSecret)
-
-            return decipheredSecret
-
-        }.run {
-            LOGGER.info("no value retrieved from keystore, creating new secret")
-            return generateSecretRSA(instanceId)
+        } catch (exc: Exception) {
+            LOGGER.error(exc.message, exc)
+            return null
         }
     }
 
-    private fun generateSecretRSA(instanceId:String):String {
+    private fun generateSecretRSA(instanceId:String):String? {
         LOGGER.info("generateSecretRSA")
 
         val secret = UUID.randomUUID().toString().replace("-","")
         LOGGER.info("random secret: {}", secret)
 
-        val keyGenerator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
-        keyGenerator.initialize(
-            KeyGenParameterSpec.Builder(instanceId,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
-                .build()
-        )
+        try {
+            val keyGenerator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
+            keyGenerator.initialize(
+                KeyGenParameterSpec.Builder(instanceId,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
+                    .build()
+            )
 
-        val keyPair = keyGenerator.generateKeyPair()
-        val publicKey = keyPair.public
+            val keyPair = keyGenerator.generateKeyPair()
+            val publicKey = keyPair.public
 
-        val cipher = Cipher.getInstance(CIPHER_PADDING_RSA_ECB)
-        cipher.init(Cipher.ENCRYPT_MODE, publicKey)
-        val cipheredSecret = BaseEncoding.base64().encode(cipher.doFinal(secret.toByteArray()))
-        LOGGER.info("ciphered secret: {}", cipheredSecret)
+            val cipher = Cipher.getInstance(CIPHER_PADDING_RSA_ECB)
+            cipher.init(Cipher.ENCRYPT_MODE, publicKey)
+            val cipheredSecret = BaseEncoding.base64().encode(cipher.doFinal(secret.toByteArray()))
+            LOGGER.info("ciphered secret: {}", cipheredSecret)
 
-        val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
-        with (sharedPref.edit()) {
-            putString(INSTANCE_CREDENTIAL, cipheredSecret)
-            commit()
+            val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
+            with (sharedPref.edit()) {
+                putString(INSTANCE_CREDENTIAL, cipheredSecret)
+                commit()
+            }
+
+            return cipheredSecret
+
+        } catch (exc: Exception) {
+            LOGGER.error(exc.message, exc)
+            return null
         }
-
-        return cipheredSecret
     }
 
-    private fun loadSecretAES():String {
+    private fun loadSecretAES():String? {
         LOGGER.info("loadSecretAES")
 
         val instanceId = loadInstanceId()
         val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
 
-        val cipheredSecretWithIV = sharedPref.getString(INSTANCE_CREDENTIAL, null)
-        LOGGER.info("retrieved ciphered secret with initialization vector: {}", cipheredSecretWithIV)
+        try {
+            val cipheredSecretWithIV = sharedPref.getString(INSTANCE_CREDENTIAL, null)
+            LOGGER.info("retrieved ciphered secret with initialization vector: {}", cipheredSecretWithIV)
 
-        cipheredSecretWithIV?.let {
-            val split = cipheredSecretWithIV.split(IV_SEPARATOR.toRegex())
-            if (split.size != 2) throw RuntimeException("ciphered secret and IV cannot be parsed")
+            cipheredSecretWithIV?.let {
+                val split = cipheredSecretWithIV.split(IV_SEPARATOR.toRegex())
+                if (split.size != 2) throw RuntimeException("ciphered secret and IV cannot be parsed")
 
-            val cipheredSecret = split[0]
-            LOGGER.info("parsed cipher secret: {}", cipheredSecret)
-            val initializationVector = split[1]
-            LOGGER.info("parsed initialization vector: {}", initializationVector)
+                val cipheredSecret = split[0]
+                LOGGER.info("parsed cipher secret: {}", cipheredSecret)
+                val initializationVector = split[1]
+                LOGGER.info("parsed initialization vector: {}", initializationVector)
 
-            val keyStore: KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply {
-                load(null)
+                val keyStore: KeyStore = KeyStore.getInstance(ANDROID_KEYSTORE).apply {
+                    load(null)
+                }
+                val keyEntry = (keyStore.getEntry(instanceId, null) as KeyStore.SecretKeyEntry?)
+                keyEntry?.let {
+                    val key = keyEntry.secretKey
+                    val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
+                    cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(BaseEncoding.base64().decode(initializationVector)))
+
+                    val decipheredSecret = String(cipher.doFinal(BaseEncoding.base64().decode(cipheredSecret)))
+                    LOGGER.info("deciphered secret: {}", decipheredSecret)
+
+                    return decipheredSecret
+                }.run {
+                    LOGGER.warn("AES key not found in keystore")
+                    return null
+                }
+
+            }.run {
+                LOGGER.info("no value retrieved from keystore, creating new secret")
+                return generateSecretAES(instanceId)
             }
-            val key = (keyStore.getEntry(instanceId, null) as KeyStore.SecretKeyEntry)?.secretKey
 
-            val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
-            cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(BaseEncoding.base64().decode(initializationVector)))
-
-            val decipheredSecret = String(cipher.doFinal(BaseEncoding.base64().decode(cipheredSecret)))
-            LOGGER.info("deciphered secret: {}", decipheredSecret)
-
-            return decipheredSecret
-
-        }.run {
-            LOGGER.info("no value retrieved from keystore, creating new secret")
-            return generateSecretAES(instanceId)
+        } catch (exc: Exception) {
+            LOGGER.error(exc.message, exc)
+            return null
         }
     }
 
-    private fun generateSecretAES(instanceId: String):String {
+    private fun generateSecretAES(instanceId: String):String? {
         LOGGER.info("generateSecretAES")
 
         val secret = UUID.randomUUID().toString().replace("-","")
         LOGGER.info("random secret: {}", secret)
 
-        val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
-        keyGenerator.init(
-            KeyGenParameterSpec.Builder(instanceId,
-                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_CBC)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_PKCS7)
-                .build()
-        )
+        try {
+            val keyGenerator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, ANDROID_KEYSTORE)
+            keyGenerator.init(
+                KeyGenParameterSpec.Builder(instanceId,
+                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_CBC)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_PKCS7)
+                    .build()
+            )
 
-        val key = keyGenerator.generateKey()
-        val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
-        cipher.init(Cipher.ENCRYPT_MODE, key)
-        val initializationVector = BaseEncoding.base64().encode(cipher.iv)
-        LOGGER.info("initialization vector: {}", initializationVector)
+            val key = keyGenerator.generateKey()
+            val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
+            cipher.init(Cipher.ENCRYPT_MODE, key)
+            val initializationVector = BaseEncoding.base64().encode(cipher.iv)
+            LOGGER.info("initialization vector: {}", initializationVector)
 
-        val cipheredSecret = BaseEncoding.base64().encode(cipher.doFinal(secret.toByteArray()))
-        LOGGER.info("ciphered secret: {}", cipheredSecret)
+            val cipheredSecret = BaseEncoding.base64().encode(cipher.doFinal(secret.toByteArray()))
+            LOGGER.info("ciphered secret: {}", cipheredSecret)
 
-        val cipheredSecretWithIV = cipheredSecret + IV_SEPARATOR + initializationVector
-        LOGGER.info("ciphered secret with initialization vector: {}", cipheredSecretWithIV)
+            val cipheredSecretWithIV = cipheredSecret + IV_SEPARATOR + initializationVector
+            LOGGER.info("ciphered secret with initialization vector: {}", cipheredSecretWithIV)
 
-        val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
-        with (sharedPref.edit()) {
-            putString(INSTANCE_CREDENTIAL, cipheredSecretWithIV)
-            commit()
+            val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
+            with (sharedPref.edit()) {
+                putString(INSTANCE_CREDENTIAL, cipheredSecretWithIV)
+                commit()
+            }
+
+            return cipheredSecretWithIV
+
+        } catch (exc: Exception) {
+            LOGGER.error(exc.message, exc)
+            return null
         }
-
-        return cipheredSecretWithIV
     }
 }
