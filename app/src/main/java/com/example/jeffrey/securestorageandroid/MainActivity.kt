@@ -3,28 +3,31 @@ package com.example.jeffrey.securestorageandroid
 import android.content.Context
 import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.support.v7.app.AppCompatActivity
 import android.widget.Button
 import com.google.common.io.BaseEncoding
-import com.google.crypto.tink.Aead
-import com.google.crypto.tink.KeysetHandle
+import com.google.crypto.tink.*
 import com.google.crypto.tink.aead.AeadConfig
 import com.google.crypto.tink.aead.AeadFactory
 import com.google.crypto.tink.aead.AeadKeyTemplates
+import com.google.crypto.tink.config.TinkConfig
+import com.google.crypto.tink.signature.PublicKeySignFactory
+import com.google.crypto.tink.signature.PublicKeyVerifyFactory
+import com.google.crypto.tink.signature.SignatureKeyTemplates
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
-import java.security.KeyPairGenerator
-import java.security.KeyStore
-import java.security.PrivateKey
+import java.io.ByteArrayOutputStream
+import java.security.*
 import java.util.*
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.spec.GCMParameterSpec
-import javax.crypto.spec.IvParameterSpec
+
 
 class MainActivity : AppCompatActivity() {
 
@@ -36,6 +39,7 @@ class MainActivity : AppCompatActivity() {
     private val aeadPrimitive: Aead
 
     init {
+        TinkConfig.register()
         AeadConfig.register()
         keysetHandle = KeysetHandle.generateNew(AeadKeyTemplates.AES256_GCM)
         aeadPrimitive = AeadFactory.getPrimitive(keysetHandle)
@@ -48,6 +52,8 @@ class MainActivity : AppCompatActivity() {
 
         const val INSTANCE_ID:String = "guid"
         const val INSTANCE_CREDENTIAL:String = "credential"
+
+        const val SIGNING_KEYSET:String = "signingKeyset"
 
         const val CIPHER_PADDING_RSA_ECB:String = "RSA/ECB/PKCS1Padding"
         const val CIPHER_PADDING_AES_CBC:String = "AES/CBC/PKCS7Padding"
@@ -119,6 +125,27 @@ class MainActivity : AppCompatActivity() {
                 decryptString()
             }
         }
+
+        val generateSigningKeysetEcdsaBtn = findViewById<Button>(R.id.generateSigningKeysetEcdsaBtn)
+        generateSigningKeysetEcdsaBtn.setOnClickListener {
+            ioScope.launch {
+                generateSigningKeysetECDSA()
+            }
+        }
+
+        val loadSigningKeysetEcdsaBtn = findViewById<Button>(R.id.loadSigningKeysetEcdsaBtn)
+        loadSigningKeysetEcdsaBtn.setOnClickListener {
+            ioScope.launch {
+                loadSigningKeysetECDSA()
+            }
+        }
+
+        val signMessageBtn = findViewById<Button>(R.id.signMessageBtn)
+        signMessageBtn.setOnClickListener {
+            ioScope.launch {
+                signMessage()
+            }
+        }
     }
 
     private fun loadInstanceId():String {
@@ -166,15 +193,26 @@ class MainActivity : AppCompatActivity() {
                     load(null)
                 }
 
-                val privateKey = keyStore.getKey(instanceId, null) as PrivateKey?
+                val privateKey = keyStore.getKey(instanceId, null) as? PrivateKey
                 //val publicKey = keyStore.getCertificate(instanceId)?.publicKey
 
-                val cipher = Cipher.getInstance(CIPHER_PADDING_RSA_ECB)
-                cipher.init(Cipher.DECRYPT_MODE, privateKey)
-                val decipheredSecret = String(cipher.doFinal(BaseEncoding.base64().decode(cipheredSecret)))
-                LOGGER.info("deciphered secret: {}", decipheredSecret)
+                privateKey?.let {
+                    val keyFactory = KeyFactory.getInstance(privateKey.algorithm, ANDROID_KEYSTORE)
+                    val keyInfo = keyFactory.getKeySpec(privateKey, KeyInfo::class.java)
+                    LOGGER.info("key inside security hardware? {}", keyInfo.isInsideSecureHardware)
+                    LOGGER.info("key require user authentication? {}", keyInfo.isUserAuthenticationRequirementEnforcedBySecureHardware)
 
-                return decipheredSecret
+                    val cipher = Cipher.getInstance(CIPHER_PADDING_RSA_ECB)
+                    cipher.init(Cipher.DECRYPT_MODE, privateKey)
+                    val decipheredSecret = String(cipher.doFinal(BaseEncoding.base64().decode(cipheredSecret)))
+                    LOGGER.info("deciphered secret: {}", decipheredSecret)
+
+                    return decipheredSecret
+
+                } ?:run {
+                    LOGGER.warn("no private key found from keystore")
+                    return generateSecretRSA(instanceId)
+                }
 
             } ?:run {
                 LOGGER.info("no value retrieved from keystore, creating new secret")
@@ -371,6 +409,106 @@ class MainActivity : AppCompatActivity() {
         } ?:run {
             LOGGER.warn("fail to retrieve secret")
             return null
+        }
+    }
+
+    private fun loadSigningKeysetECDSA():String? {
+        LOGGER.info("loadSigningKeysetECDSA")
+
+        val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
+        val privateKeyJsonBase64 = sharedPref.getString(SIGNING_KEYSET, null)
+        LOGGER.info("retrieved signing private key json base64 {}", privateKeyJsonBase64)
+
+        privateKeyJsonBase64?.let {
+            return privateKeyJsonBase64
+        } ?:run {
+            return generateSigningKeysetECDSA()
+        }
+
+//        try {
+//            privateKeyJsonBase64?.let {
+//                val privateKeyByteArray = BaseEncoding.base64().decode(privateKeyJsonBase64)
+//                val privateKeysetHandle = CleartextKeysetHandle.read(JsonKeysetReader.withBytes(privateKeyByteArray))
+//                return privateKeysetHandle
+//            } ?:run {
+//                return generateSigningKeysetECDSA()
+//            }
+//
+//        } catch (exc:Exception) {
+//            LOGGER.error(exc.message, exc)
+//            return null
+//        }
+    }
+
+    private fun generateSigningKeysetECDSA():String? {
+        LOGGER.info("generateSigningKeysetECDSA")
+
+        return try {
+            val privateKeysetHandle = KeysetHandle.generateNew(SignatureKeyTemplates.ECDSA_P256)
+            val publicKeysetHandle = privateKeysetHandle.publicKeysetHandle
+
+            val privateKeyOutputStream = ByteArrayOutputStream()
+            CleartextKeysetHandle.write(privateKeysetHandle, JsonKeysetWriter.withOutputStream(privateKeyOutputStream))
+            val privteKeyByteArray = privateKeyOutputStream.toByteArray()
+            val privateKeyJsonString = String(privteKeyByteArray)
+            println("private key json: ${privateKeyJsonString}")
+            val privateKeyJsonBase64 = BaseEncoding.base64().encode(privteKeyByteArray)
+            println("private key json base64: ${privateKeyJsonBase64} ")
+
+            val publicKeyOutputStream = ByteArrayOutputStream()
+            CleartextKeysetHandle.write(publicKeysetHandle, JsonKeysetWriter.withOutputStream(publicKeyOutputStream))
+            val publicKeyByteArray = publicKeyOutputStream.toByteArray()
+            val publicKeyJsonString = String(publicKeyByteArray)
+            println("public key json: ${publicKeyJsonString}")
+            val publicKeyJsonBase64 = BaseEncoding.base64().encode(publicKeyByteArray)
+            println("public key json base64: $publicKeyJsonBase64")
+
+            val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
+            with (sharedPref.edit()) {
+                putString(SIGNING_KEYSET, privateKeyJsonBase64)
+                commit()
+            }
+            privateKeyJsonBase64
+
+        } catch (exc:Exception) {
+            LOGGER.error(exc.message, exc)
+            null
+        }
+    }
+
+    private fun signMessage() {
+        LOGGER.info("signMessage")
+
+        val message = "abcdef"
+
+        val privateKeyJsonBase64 = loadSigningKeysetECDSA()
+        privateKeyJsonBase64?.let {
+            try {
+                val privateKeyByteArray = BaseEncoding.base64().decode(privateKeyJsonBase64)
+                val privateKeysetHandle = CleartextKeysetHandle.read(JsonKeysetReader.withBytes(privateKeyByteArray))
+                val publicKeysetHandle = privateKeysetHandle.publicKeysetHandle
+
+                val signer = PublicKeySignFactory.getPrimitive(privateKeysetHandle)
+                val signature = signer.sign(message.toByteArray())
+                val signatureBase64String = BaseEncoding.base64().encode(signature)
+                val signatureHexString = BaseEncoding.base16().encode(signature)
+                println("signature base64: $signatureBase64String")
+                println("signature HEX: $signatureHexString")
+
+                val verifier = PublicKeyVerifyFactory.getPrimitive(publicKeysetHandle)
+                try {
+                    verifier.verify(signature, message.toByteArray())
+                } catch (exc: GeneralSecurityException) {
+                    LOGGER.warn("fail to verify signature: {}", exc.message)
+                }
+                LOGGER.info("signature verification success")
+
+            } catch (exc:Exception) {
+                LOGGER.error(exc.message, exc)
+            }
+
+        } ?:run {
+            LOGGER.warn("keyset cannot be retrieved, fail to sign message")
         }
     }
 }
