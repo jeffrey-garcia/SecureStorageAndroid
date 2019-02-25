@@ -96,6 +96,34 @@
                     app:layout_constraintTop_toBottomOf="@+id/generateSecretRsaBtn" />
 
             <Button
+                    android:id="@+id/encryptRsaBtn"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp"
+                    android:layout_marginLeft="8dp"
+                    android:layout_marginRight="8dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_marginTop="8dp"
+                    android:text="Encrypt with RSA"
+                    app:layout_constraintLeft_toLeftOf="parent"
+                    app:layout_constraintRight_toRightOf="parent"
+                    app:layout_constraintTop_toBottomOf="@+id/loadSecretRsaBtn" />
+
+            <Button
+                    android:id="@+id/decryptRsaBtn"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginEnd="8dp"
+                    android:layout_marginLeft="8dp"
+                    android:layout_marginRight="8dp"
+                    android:layout_marginStart="8dp"
+                    android:layout_marginTop="8dp"
+                    android:text="Decrypt with RSA"
+                    app:layout_constraintLeft_toLeftOf="parent"
+                    app:layout_constraintRight_toRightOf="parent"
+                    app:layout_constraintTop_toBottomOf="@+id/encryptRsaBtn" />
+
+            <Button
                     android:id="@+id/generateSecretAesBtn"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -107,7 +135,7 @@
                     android:text="Generate AES Secret"
                     app:layout_constraintLeft_toLeftOf="parent"
                     app:layout_constraintRight_toRightOf="parent"
-                    app:layout_constraintTop_toBottomOf="@+id/loadSecretRsaBtn" />
+                    app:layout_constraintTop_toBottomOf="@+id/decryptRsaBtn" />
 
             <Button
                     android:id="@+id/loadSecretAesBtn"

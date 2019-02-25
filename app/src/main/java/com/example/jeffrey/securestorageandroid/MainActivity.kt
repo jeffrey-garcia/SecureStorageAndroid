@@ -1,10 +1,13 @@
 package com.example.jeffrey.securestorageandroid
 
 import android.content.Context
+import android.os.Build
 import android.os.Bundle
+import android.security.KeyPairGeneratorSpec
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
+import android.support.annotation.RequiresApi
 import android.support.v7.app.AppCompatActivity
 import android.widget.Button
 import com.google.common.io.BaseEncoding
@@ -22,11 +25,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import java.io.ByteArrayOutputStream
+import java.math.BigInteger
 import java.security.*
 import java.util.*
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.spec.GCMParameterSpec
+import javax.security.auth.x500.X500Principal
 
 
 class MainActivity : AppCompatActivity() {
@@ -98,31 +103,49 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        val encryptRsaBtn = findViewById<Button>(R.id.encryptRsaBtn)
+        encryptRsaBtn.setOnClickListener {
+            ioScope.launch {
+                encryptStringRsa()
+            }
+        }
+
+        val decryptRsaBtn = findViewById<Button>(R.id.decryptRsaBtn)
+        decryptRsaBtn.setOnClickListener {
+            ioScope.launch {
+                decryptStringRsa()
+            }
+        }
+
         val generateSecretAesBtn = findViewById<Button>(R.id.generateSecretAesBtn)
         generateSecretAesBtn.setOnClickListener {
             ioScope.launch {
-                generateSecretAES(loadInstanceId())
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                    generateSecretAES(loadInstanceId())
             }
         }
 
         val loadSecretAesBtn = findViewById<Button>(R.id.loadSecretAesBtn)
         loadSecretAesBtn.setOnClickListener {
             ioScope.launch {
-                loadSecretAES()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                    loadSecretAES()
             }
         }
 
         val encryptAesBtn = findViewById<Button>(R.id.encryptAesBtn)
         encryptAesBtn.setOnClickListener {
             ioScope.launch {
-                encryptString()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                    encryptStringAes()
             }
         }
 
         val decryptAesBtn = findViewById<Button>(R.id.decryptAesBtn)
         decryptAesBtn.setOnClickListener {
             ioScope.launch {
-                decryptString()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M)
+                    decryptStringAes()
             }
         }
 
@@ -172,7 +195,7 @@ class MainActivity : AppCompatActivity() {
 
         with (sharedPref.edit()) {
             putString(INSTANCE_ID, instanceId)
-            commit()
+            apply()
         }
 
         return instanceId
@@ -197,10 +220,12 @@ class MainActivity : AppCompatActivity() {
                 //val publicKey = keyStore.getCertificate(instanceId)?.publicKey
 
                 privateKey?.let {
-                    val keyFactory = KeyFactory.getInstance(privateKey.algorithm, ANDROID_KEYSTORE)
-                    val keyInfo = keyFactory.getKeySpec(privateKey, KeyInfo::class.java)
-                    LOGGER.info("key inside security hardware? {}", keyInfo.isInsideSecureHardware)
-                    LOGGER.info("key require user authentication? {}", keyInfo.isUserAuthenticationRequirementEnforcedBySecureHardware)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        val keyFactory = KeyFactory.getInstance(privateKey.algorithm, ANDROID_KEYSTORE)
+                        val keyInfo = keyFactory.getKeySpec(privateKey, KeyInfo::class.java)
+                        LOGGER.info("key inside security hardware? {}", keyInfo.isInsideSecureHardware)
+                        LOGGER.info("key require user authentication? {}", keyInfo.isUserAuthenticationRequirementEnforcedBySecureHardware)
+                    }
 
                     val cipher = Cipher.getInstance(CIPHER_PADDING_RSA_ECB)
                     cipher.init(Cipher.DECRYPT_MODE, privateKey)
@@ -233,13 +258,30 @@ class MainActivity : AppCompatActivity() {
 
         try {
             val keyGenerator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, ANDROID_KEYSTORE)
-            keyGenerator.initialize(
-                KeyGenParameterSpec.Builder(instanceId,
-                    KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
-                    .build()
-            )
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                keyGenerator.initialize(
+                    KeyGenParameterSpec.Builder(instanceId,
+                        KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                        .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                        .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_RSA_PKCS1)
+                        .build()
+                )
+            } else {
+                val start = Calendar.getInstance()
+                val end = Calendar.getInstance()
+                end.add(Calendar.YEAR, 1)
+
+                keyGenerator.initialize(
+                    KeyPairGeneratorSpec.Builder(this.applicationContext)
+                        .setAlias("rmfKey")
+                        .setSubject(X500Principal("CN=rmfKey"))
+                        .setSerialNumber(BigInteger.valueOf(1337))
+                        .setStartDate(start.time)
+                        .setEndDate(end.time)
+                        .build()
+                )
+            }
 
             val keyPair = keyGenerator.generateKeyPair()
             val publicKey = keyPair.public
@@ -252,7 +294,7 @@ class MainActivity : AppCompatActivity() {
             val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
             with (sharedPref.edit()) {
                 putString(INSTANCE_CREDENTIAL, cipheredSecret)
-                commit()
+                apply()
             }
 
             return cipheredSecret
@@ -263,6 +305,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.M)
     private fun loadSecretAES():String? {
         LOGGER.info("loadSecretAES")
 
@@ -288,6 +331,12 @@ class MainActivity : AppCompatActivity() {
                 val keyEntry = (keyStore.getEntry(instanceId, null) as KeyStore.SecretKeyEntry?)
                 keyEntry?.let {
                     val key = keyEntry.secretKey
+
+                    val keyFactory = KeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
+                    val keyInfo = keyFactory.getKeySpec(key, KeyInfo::class.java)
+                    LOGGER.info("key inside security hardware? {}", keyInfo.isInsideSecureHardware)
+                    LOGGER.info("key require user authentication? {}", keyInfo.isUserAuthenticationRequirementEnforcedBySecureHardware)
+
                     //val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
                     //cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(BaseEncoding.base64().decode(initializationVector)))
                     val cipher = Cipher.getInstance(CIPHER_PADDING_AES_GCM)
@@ -313,6 +362,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.M)
     private fun generateSecretAES(instanceId: String):String? {
         LOGGER.info("generateSecretAES")
 
@@ -347,7 +397,7 @@ class MainActivity : AppCompatActivity() {
             val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
             with (sharedPref.edit()) {
                 putString(INSTANCE_CREDENTIAL, cipheredSecretWithIV)
-                commit()
+                apply()
             }
 
             return cipheredSecretWithIV
@@ -358,13 +408,69 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun encryptString():String? {
+    private fun encryptStringRsa():String? {
+        val plainText = "some_value"
+        return encryptRSA(plainText)
+    }
+
+    private fun decryptStringRsa():String? {
+        val cipheredText = encryptStringRsa()
+        return cipheredText?.let {
+            decryptRSA(cipheredText)
+        } ?:run {
+            null
+        }
+    }
+
+    private fun encryptRSA(decipheredText:String):String? {
+        LOGGER.info("encryptRsa")
+
+        val secret = loadSecretRSA()
+        secret?.let {
+            return try {
+                val cipheredText = BaseEncoding.base64().encode(aeadPrimitive.encrypt(decipheredText.toByteArray(), secret.toByteArray()))
+                LOGGER.info("ciphered text: {}", cipheredText)
+                cipheredText
+
+            } catch (exc: Exception) {
+                LOGGER.error(exc.message, exc)
+                null
+            }
+        } ?:run {
+            LOGGER.warn("fail to retrieve secret")
+            return null
+        }
+    }
+
+    private fun decryptRSA(cipheredText:String):String? {
+        LOGGER.info("decryptAES")
+
+        val secret = loadSecretRSA()
+        secret?.let {
+            return try {
+                val decipheredText = String(aeadPrimitive.decrypt(BaseEncoding.base64().decode(cipheredText), secret.toByteArray()))
+                LOGGER.info("deciphered text: {}", decipheredText)
+                decipheredText
+
+            } catch (exc: Exception) {
+                LOGGER.error(exc.message, exc)
+                null
+            }
+        } ?:run {
+            LOGGER.warn("fail to retrieve secret")
+            return null
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.M)
+    private fun encryptStringAes():String? {
         val plainText = "some_value"
         return encryptAES(plainText)
     }
 
-    private fun decryptString():String? {
-        val cipheredText = encryptString()
+    @RequiresApi(Build.VERSION_CODES.M)
+    private fun decryptStringAes():String? {
+        val cipheredText = encryptStringAes()
         return cipheredText?.let {
             decryptAES(cipheredText)
         } ?:run {
@@ -372,6 +478,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.M)
     private fun encryptAES(decipheredText:String):String? {
         LOGGER.info("encryptAES")
 
@@ -392,6 +499,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.M)
     private fun decryptAES(cipheredText:String):String? {
         LOGGER.info("decryptAES")
 
@@ -466,7 +574,7 @@ class MainActivity : AppCompatActivity() {
             val sharedPref = this.getSharedPreferences(this.packageName, Context.MODE_PRIVATE)
             with (sharedPref.edit()) {
                 putString(SIGNING_KEYSET, privateKeyJsonBase64)
-                commit()
+                apply()
             }
             privateKeyJsonBase64
 
