@@ -16,6 +16,7 @@ import com.google.crypto.tink.aead.AeadConfig
 import com.google.crypto.tink.aead.AeadFactory
 import com.google.crypto.tink.aead.AeadKeyTemplates
 import com.google.crypto.tink.config.TinkConfig
+import com.google.crypto.tink.integration.android.AndroidKeysetManager
 import com.google.crypto.tink.signature.PublicKeySignFactory
 import com.google.crypto.tink.signature.PublicKeyVerifyFactory
 import com.google.crypto.tink.signature.SignatureKeyTemplates
@@ -40,15 +41,8 @@ class MainActivity : AppCompatActivity() {
     private val ioScope = CoroutineScope(Dispatchers.IO + job)
     private val uiScope = CoroutineScope(Dispatchers.Main + job)
 
-    private val keysetHandle: KeysetHandle
-    private val aeadPrimitive: Aead
-
-    init {
-        TinkConfig.register()
-        AeadConfig.register()
-        keysetHandle = KeysetHandle.generateNew(AeadKeyTemplates.AES256_GCM)
-        aeadPrimitive = AeadFactory.getPrimitive(keysetHandle)
-    }
+    private var keysetHandle: KeysetHandle? = null
+    private var aeadPrimitive: Aead? = null
 
     companion object {
         private val LOGGER = LoggerFactory.getLogger(MainActivity::class.java)
@@ -65,6 +59,37 @@ class MainActivity : AppCompatActivity() {
         const val CIPHER_PADDING_AES_GCM:String = "AES/GCM/NoPadding"
 
         const val IV_SEPARATOR = ":" // not used in base64 encoding table
+
+        const val KEYSET_NAME = "my_keyset"
+        const val MASTER_KEY_URI = "android-keystore://my_master_key_id"
+        const val PREF_FILENAME = "my_pref_file"
+    }
+
+    init {
+        val context = this
+        ioScope.launch {
+            try {
+                TinkConfig.register()
+                AeadConfig.register()
+
+                // in-memory keyset without using any platform's keystore manager
+                //keysetHandle = KeysetHandle.generateNew(AeadKeyTemplates.AES256_GCM)
+                //aeadPrimitive = AeadFactory.getPrimitive(keysetHandle)
+
+                val keysetManager:AndroidKeysetManager? = AndroidKeysetManager.Builder()
+                    .withSharedPref(context, KEYSET_NAME, PREF_FILENAME)
+                    .withMasterKeyUri(MASTER_KEY_URI)
+                    .withKeyTemplate(AeadKeyTemplates.AES256_GCM)
+                    .build()
+
+                keysetManager?.let {
+                    keysetHandle = keysetManager.keysetHandle
+                    aeadPrimitive = AeadFactory.getPrimitive(keysetHandle)
+                }
+            } catch (e:Exception) {
+                LOGGER.error(e.message, e)
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -332,10 +357,10 @@ class MainActivity : AppCompatActivity() {
                 keyEntry?.let {
                     val key = keyEntry.secretKey
 
-                    val keyFactory = KeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
-                    val keyInfo = keyFactory.getKeySpec(key, KeyInfo::class.java)
-                    LOGGER.info("key inside security hardware? {}", keyInfo.isInsideSecureHardware)
-                    LOGGER.info("key require user authentication? {}", keyInfo.isUserAuthenticationRequirementEnforcedBySecureHardware)
+//                    val keyFactory = KeyFactory.getInstance(key.algorithm, ANDROID_KEYSTORE)
+//                    val keyInfo = keyFactory.getKeySpec(key, KeyInfo::class.java)
+//                    LOGGER.info("key inside security hardware? {}", keyInfo.isInsideSecureHardware)
+//                    LOGGER.info("key require user authentication? {}", keyInfo.isUserAuthenticationRequirementEnforcedBySecureHardware)
 
                     //val cipher = Cipher.getInstance(CIPHER_PADDING_AES_CBC)
                     //cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(BaseEncoding.base64().decode(initializationVector)))
@@ -428,10 +453,14 @@ class MainActivity : AppCompatActivity() {
         val secret = loadSecretRSA()
         secret?.let {
             return try {
-                val cipheredText = BaseEncoding.base64().encode(aeadPrimitive.encrypt(decipheredText.toByteArray(), secret.toByteArray()))
-                LOGGER.info("ciphered text: {}", cipheredText)
-                cipheredText
-
+                aeadPrimitive?.let {
+                    val cipheredText = BaseEncoding.base64().encode(aeadPrimitive!!.encrypt(decipheredText.toByteArray(), secret.toByteArray()))
+                    LOGGER.info("ciphered text: {}", cipheredText)
+                    cipheredText
+                } ?:run {
+                    LOGGER.warn("no primitive found!")
+                    null
+                }
             } catch (exc: Exception) {
                 LOGGER.error(exc.message, exc)
                 null
@@ -448,10 +477,14 @@ class MainActivity : AppCompatActivity() {
         val secret = loadSecretRSA()
         secret?.let {
             return try {
-                val decipheredText = String(aeadPrimitive.decrypt(BaseEncoding.base64().decode(cipheredText), secret.toByteArray()))
-                LOGGER.info("deciphered text: {}", decipheredText)
-                decipheredText
-
+                aeadPrimitive?.let {
+                    val decipheredText = String(aeadPrimitive!!.decrypt(BaseEncoding.base64().decode(cipheredText), secret.toByteArray()))
+                    LOGGER.info("deciphered text: {}", decipheredText)
+                    decipheredText
+                } ?:run {
+                    LOGGER.warn("no primitive found!")
+                    null
+                }
             } catch (exc: Exception) {
                 LOGGER.error(exc.message, exc)
                 null
@@ -485,10 +518,14 @@ class MainActivity : AppCompatActivity() {
         val secret = loadSecretAES()
         secret?.let {
             return try {
-                val cipheredText = BaseEncoding.base64().encode(aeadPrimitive.encrypt(decipheredText.toByteArray(), secret.toByteArray()))
-                LOGGER.info("ciphered text: {}", cipheredText)
-                cipheredText
-
+                aeadPrimitive?.let {
+                    val cipheredText = BaseEncoding.base64().encode(aeadPrimitive!!.encrypt(decipheredText.toByteArray(), secret.toByteArray()))
+                    LOGGER.info("ciphered text: {}", cipheredText)
+                    cipheredText
+                } ?:run {
+                    LOGGER.warn("no primitive found")
+                    null
+                }
             } catch (exc: Exception) {
                 LOGGER.error(exc.message, exc)
                 null
@@ -506,10 +543,14 @@ class MainActivity : AppCompatActivity() {
         val secret = loadSecretAES()
         secret?.let {
             return try {
-                val decipheredText = String(aeadPrimitive.decrypt(BaseEncoding.base64().decode(cipheredText), secret.toByteArray()))
-                LOGGER.info("deciphered text: {}", decipheredText)
-                decipheredText
-
+                aeadPrimitive?.let {
+                    val decipheredText = String(aeadPrimitive!!.decrypt(BaseEncoding.base64().decode(cipheredText), secret.toByteArray()))
+                    LOGGER.info("deciphered text: {}", decipheredText)
+                    decipheredText
+                } ?:run {
+                    LOGGER.warn("no primitive found!")
+                    null
+                }
             } catch (exc: Exception) {
                 LOGGER.error(exc.message, exc)
                 null
@@ -528,6 +569,19 @@ class MainActivity : AppCompatActivity() {
         LOGGER.info("retrieved signing private key json base64 {}", privateKeyJsonBase64)
 
         privateKeyJsonBase64?.let {
+            val privateKeyByteArray = BaseEncoding.base64().decode(privateKeyJsonBase64)
+            val privateKeyJsonString = String(privateKeyByteArray)
+            println("private key json: ${privateKeyJsonString}")
+            val privateKeysetHandle = CleartextKeysetHandle.read(JsonKeysetReader.withBytes(privateKeyByteArray))
+            val publicKeysetHandle = privateKeysetHandle.publicKeysetHandle
+            val publicKeyOutputStream = ByteArrayOutputStream()
+            CleartextKeysetHandle.write(publicKeysetHandle, JsonKeysetWriter.withOutputStream(publicKeyOutputStream))
+            val publicKeyByteArray = publicKeyOutputStream.toByteArray()
+            val publicKeyJsonString = String(publicKeyByteArray)
+            println("public key json: ${publicKeyJsonString}")
+            val publicKeyJsonBase64 = BaseEncoding.base64().encode(publicKeyByteArray)
+            println("public key json base64: $publicKeyJsonBase64")
+
             return privateKeyJsonBase64
         } ?:run {
             return generateSigningKeysetECDSA()
@@ -587,7 +641,7 @@ class MainActivity : AppCompatActivity() {
     private fun signMessage() {
         LOGGER.info("signMessage")
 
-        val message = "abcdef"
+        val message = "{\"pinnedDomains\":[{\"domain\":\"vncmpsit-manulife-vietnam.cs72.force.com\",\"publicKeyHashes\":{\"digestAlgorithm\":\"SHA-256\",\"hashValue\":\"5ae6406b17e601a32e4d5d929998792db6bc0dffefd646f6e44afd92d3f747e9\"},\"certificateHashes\":{\"digestAlgorithm\":\"SHA-256\",\"hashValue\":\"997d23f5c6b581c6ae865bab8fc90434e5cdce899a5c9b2597834e9ad9bebbad\"}}]}"
 
         val privateKeyJsonBase64 = loadSigningKeysetECDSA()
         privateKeyJsonBase64?.let {
