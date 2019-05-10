@@ -7,9 +7,9 @@ import android.security.KeyPairGeneratorSpec
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
-import android.support.annotation.RequiresApi
-import android.support.v7.app.AppCompatActivity
 import android.widget.Button
+import androidx.annotation.RequiresApi
+import androidx.appcompat.app.AppCompatActivity
 import com.google.common.io.BaseEncoding
 import com.google.crypto.tink.*
 import com.google.crypto.tink.aead.AeadConfig
